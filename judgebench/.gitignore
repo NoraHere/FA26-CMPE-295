@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+# model weights / datasets live outside the repo (~/models, ~/datasets)
+*.safetensors
+*.bin
+*.pt
+
+CLAUDE.md
+docs/coordination_nikil.md
+# run outputs: regenerate from jobs/ (keep the empty dirs)
+logs/*
+!logs/.gitkeep
+results/*
+!results/.gitkeep
+# local tool state
+.claude/
