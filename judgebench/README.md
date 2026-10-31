@@ -11,7 +11,11 @@ become a qjudge stage once that repo lands.
 | `jb_eval.py` | evaluator: `--mode pointwise | pairwise | both`, `--limit N` for a stratified subsample, `--grid` for a quantized judge |
 | `quant_grids.py` | offset-shifted round-to-nearest weight grids (fake quant), shared by `jb_eval.py` and S9: `bf16`, INT4 `g00..g15`, INT8 `i8g00..i8g15` |
 | `jb_compare.py` | grid runs vs the BF16 run: accuracy, paired change vs BF16 (bootstrap CI), agreement with BF16 |
+| `s9_build_injection.py` | S9 data (CPU): GSM8K wrong answers with/without "verified" notes, hash partitions, gold kept in `audit.jsonl` |
+| `s9_score_grids.py` | S9 scoring (GPU): BF16 + 16 offset-shifted INT4 grids (same scale and worst-case error) + INT8 control grids |
+| `s9_lottery_stats.py` | S9 rounding-lottery statistics (CPU): spread, split-half, transfer, audit; `--synthetic` self-test |
 | `jobs/s9_grids.sbatch` | S9 build + score + stats (16 INT4 + 16 INT8 grids, primary note `strong`); smoke via `PARTITIONS=discovery LIMIT=4 GRIDS=2 INT8=2 EVAL=all` |
+| `docs/s9_preregistration.md` | S9 hypothesis and pass/fail rule (draft; freeze before development/locked runs) |
 | `jobs/setup_env.sbatch` | one-time offline install of the pinned stack from `~/wheelhouse` into the GPU venv |
 | `jobs/jb_smoke.sbatch` | 4 pairs (2 math + 2 code), both modes, Qwen3-4B, plus a forced-truncation run at max-len 1024 |
 | `jobs/jb_full.sbatch` | all 109 pairs, both modes, Qwen3-4B BF16; `MODEL=... DTYPE=...` overrides |

@@ -15,3 +15,5 @@ results/*
 !results/.gitkeep
 # local tool state
 .claude/
+# derived datasets: rebuild with s9_build_injection.py
+data/
