@@ -14,6 +14,7 @@ Gold labels are only read in score_*() after the model call; they never enter a 
 
 Usage (GPU node only):
   python jb_eval.py --mode both --limit 4
+  python jb_eval.py --mode both --grid g05     # INT4 grid 5 of 16 (see quant_grids.py)
 """
 
 import argparse
@@ -24,6 +25,8 @@ import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from quant_grids import apply_grid, parse_grid, target_linears
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_MODEL = "/home/019111677/models/Qwen3-1.7B"
@@ -345,7 +348,8 @@ def summarize(records, n_boot, seed):
 
 def write_markdown(path, meta, summary):
     lines = [f"# JudgeBench eval: {meta['run_name']}", ""]
-    lines += [f"- model: `{meta['model_path']}` ({meta['dtype']}), GPU: {meta.get('gpu')}",
+    lines += [f"- model: `{meta['model_path']}` ({meta['dtype']}, grid {meta.get('grid', 'bf16')}), "
+              f"GPU: {meta.get('gpu')}",
               f"- items: {meta['n_items']} pairs, max_len {meta['max_len']}, "
               f"bootstrap {meta['n_boot']} resamples clustered by original_id (pair_id if null)",
               f"- torch {meta.get('torch')}, transformers {meta.get('transformers')}", ""]
@@ -382,11 +386,17 @@ def main():
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--out-dir", default=str(HERE / "results"))
     ap.add_argument("--summarize-only", action="store_true", help="recompute summary from items.jsonl")
+    ap.add_argument("--grid", default="bf16",
+                    help="weight grid from quant_grids.py: bf16 (default), g00..g15 (INT4), i8g00..i8g15 (INT8)")
     args = ap.parse_args()
+    parse_grid(args.grid)  # fail fast on a bad name
+    if args.grid != "bf16" and args.dtype != "bfloat16":
+        raise SystemExit("--grid rounds from the BF16 weights; use --dtype bfloat16")
 
     modes = ["pointwise", "pairwise"] if args.mode == "both" else [args.mode]
     model_tag = Path(args.model_path).name.lower()
-    run_name = args.run_name or f"jb_{model_tag}_{args.dtype}_{args.mode}_n{args.limit or 'all'}"
+    grid_tag = "" if args.grid == "bf16" else f"_{args.grid}"
+    run_name = args.run_name or f"jb_{model_tag}_{args.dtype}{grid_tag}_{args.mode}_n{args.limit or 'all'}"
     run_dir = Path(args.out_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     items_path = run_dir / "items.jsonl"
@@ -404,7 +414,11 @@ def main():
     print(f"[resume] {len(done)} (pair, mode) records already in {items_path}", flush=True)
 
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    if meta and meta.get("grid", "bf16") != args.grid:
+        raise SystemExit(f"{run_dir} was run with grid {meta.get('grid', 'bf16')}, not {args.grid}; "
+                         "use a new --run-name.")
     meta.update({
+        "grid": args.grid,
         "run_name": run_name, "model_path": args.model_path, "data_path": args.data_path,
         "dtype": args.dtype, "max_len": args.max_len, "limit": args.limit, "seed": args.seed,
         "n_boot": args.n_boot, "n_items": len(items), "modes": modes,
@@ -420,6 +434,14 @@ def main():
         import torch
         import transformers
         judge = Judge(args.model_path, args.dtype, args.max_len)
+        if args.grid != "bf16":
+            linears = target_linears(judge.model)
+            original = {n: m.weight.detach().clone() for n, m in linears}
+            meta["weight_err_over_scale"] = apply_grid(linears, original, args.grid)
+            del original
+            torch.cuda.empty_cache()
+            print(f"[grid] {args.grid}: {len(linears)} linear layers rounded, "
+                  f"max err/s {meta['weight_err_over_scale']:.3f}", flush=True)
         meta.update({"torch": torch.__version__, "transformers": transformers.__version__,
                      "gpu": torch.cuda.get_device_name(0), "python": sys.version.split()[0]})
         labels = meta.setdefault("labels", {})

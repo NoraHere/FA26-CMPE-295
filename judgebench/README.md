@@ -8,10 +8,14 @@ become a qjudge stage once that repo lands.
 
 | path | what |
 |---|---|
-| `jb_eval.py` | evaluator: `--mode pointwise | pairwise | both`, `--limit N` for a stratified subsample |
+| `jb_eval.py` | evaluator: `--mode pointwise | pairwise | both`, `--limit N` for a stratified subsample, `--grid` for a quantized judge |
+| `quant_grids.py` | offset-shifted round-to-nearest weight grids (fake quant), shared by `jb_eval.py` and S9: `bf16`, INT4 `g00..g15`, INT8 `i8g00..i8g15` |
+| `jb_compare.py` | grid runs vs the BF16 run: accuracy, paired change vs BF16 (bootstrap CI), agreement with BF16 |
+| `jobs/s9_grids.sbatch` | S9 build + score + stats (16 INT4 + 16 INT8 grids, primary note `strong`); smoke via `PARTITIONS=discovery LIMIT=4 GRIDS=2 INT8=2 EVAL=all` |
 | `jobs/setup_env.sbatch` | one-time offline install of the pinned stack from `~/wheelhouse` into the GPU venv |
 | `jobs/jb_smoke.sbatch` | 4 pairs (2 math + 2 code), both modes, Qwen3-4B, plus a forced-truncation run at max-len 1024 |
-| `jobs/jb_full.sbatch` | all 109 pairs, both modes; `MODEL=... DTYPE=...` overrides |
+| `jobs/jb_full.sbatch` | all 109 pairs, both modes, Qwen3-4B BF16; `MODEL=... DTYPE=...` overrides |
+| `jobs/jb_grids.sbatch` | all 109 pairs on each grid (default the 16 INT4 grids; `GRIDS="i8g00 ..."` overrides) |
 | `results/<run>/` | `items.jsonl` (one line per pair x mode), `meta.json`, `summary.json`, `summary.md` |
 | `docs/jb_mathcode_pair_ids.tsv` | the 109 pair ids (56 livebench-math, 11 mmlu-pro-math, 42 livecodebench) |
 | `notebooks/` | earlier generation-based A/B pilot (superseded by `jb_eval.py`) |
@@ -47,7 +51,9 @@ sbatch jobs/jb_full.sbatch
 
 ## Not yet done
 
-- Quantized conditions (INT8 / INT4 RTN / INT4 GPTQ): waiting on qjudge loaders.
+- Quantized conditions: own offset-shifted RTN grids (`--grid`, fake quant) are available now; torchao
+  INT8/INT4 and the team's GPTQ still need the qjudge loaders. Results from `--grid` should be
+  cross-checked against those once available.
 - Pointwise prompt should be swapped for the exact qjudge prompt when available
   (`POINTWISE_TEMPLATE`; its hash is in `meta.json` so runs stay distinguishable).
 - Team judges downloaded: Qwen3-1.7B, Qwen3-4B. Still to fetch: Qwen3-8B, Phi-4-mini, Granite-3.3-8B.
