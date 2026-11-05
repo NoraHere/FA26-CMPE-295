@@ -16,9 +16,13 @@ source env.sh
 
 echo "host: $(hostname)  job: ${SLURM_JOB_ID:-none}"
 python -m pip install --no-index --find-links /home/019111677/wheelhouse \
-    "torch==2.6.0" "transformers==4.57.1" "torchao==0.10.0" "numpy==1.26.4" accelerate
+    "torch==2.6.0" "transformers==4.57.1" "torchao==0.10.0" "numpy==1.26.4" accelerate \
+    langdetect nltk immutabledict absl-py   # IFEval rule checkers; nltk data in ~/nltk_data
 python - <<'EOF'
 import torch, transformers, torchao
+import langdetect, nltk, immutabledict, absl
+nltk.word_tokenize("IFEval checkers need punkt."); nltk.sent_tokenize("One. Two.")
+print("ifeval deps ok: nltk", nltk.__version__)
 print("torch", torch.__version__, "cuda", torch.version.cuda, "available", torch.cuda.is_available())
 print("transformers", transformers.__version__, "torchao", torchao.__version__)
 if torch.cuda.is_available():

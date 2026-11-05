@@ -37,9 +37,8 @@ def target_linears(model):
     return [(n, m) for n, m in model.model.layers.named_modules() if isinstance(m, torch.nn.Linear)]
 
 
-def fake_quant(w, g, bits=4):
-    """Shifted asymmetric RTN of a (out, in) weight; returns (dequantized weight, max |err| / s)."""
-    import torch
+def grid_params(w, g, bits=4):
+    """Per-group scale and offset of grid g for a (out, in) weight, each shaped (out, in / GROUP, 1)."""
     levels = 2 ** bits
     out_f, in_f = w.shape
     assert in_f % GROUP == 0, f"in_features {in_f} not divisible by {GROUP}"
@@ -47,7 +46,16 @@ def fake_quant(w, g, bits=4):
     lo = x.amin(-1, keepdim=True)
     hi = x.amax(-1, keepdim=True)
     s = ((hi - lo) / (levels - 2)).clamp_min(1e-8)
-    off = lo - (g / N_GRIDS) * s
+    return s, lo - (g / N_GRIDS) * s
+
+
+def fake_quant(w, g, bits=4):
+    """Shifted asymmetric RTN of a (out, in) weight; returns (dequantized weight, max |err| / s)."""
+    import torch
+    levels = 2 ** bits
+    out_f, in_f = w.shape
+    s, off = grid_params(w, g, bits)
+    x = w.float().reshape(out_f, in_f // GROUP, GROUP)
     q = torch.clamp(torch.round((x - off) / s), 0, levels - 1)
     deq = q * s + off
     err = float(((deq - x).abs() / s).max())

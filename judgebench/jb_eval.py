@@ -1,4 +1,7 @@
-"""JudgeBench (GPT split, math + code) evaluation with first-token logit judges.
+"""JudgeBench (GPT split) evaluation with first-token logit judges.
+
+Tasks (--tasks, default math,code): math (livebench-math 56, mmlu-pro-math 11), code (livecodebench 42),
+reasoning (livebench-reasoning 98), knowledge (the 13 non-math MMLU-Pro subjects, 11 pairs each = 143).
 
 Standalone until the team qjudge harness is available; mirrors its protocol:
 thinking off, no sampling, score = first-token logit margin, label tokens chosen
@@ -15,6 +18,7 @@ Gold labels are only read in score_*() after the model call; they never enter a 
 Usage (GPU node only):
   python jb_eval.py --mode both --limit 4
   python jb_eval.py --mode both --grid g05     # INT4 grid 5 of 16 (see quant_grids.py)
+  python jb_eval.py --tasks knowledge,reasoning --method gptq --grid g05   # see quant_methods.py
 """
 
 import argparse
@@ -32,12 +36,19 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_MODEL = "/home/019111677/models/Qwen3-1.7B"
 DEFAULT_DATA = "/home/019111677/datasets/JudgeBench/data/gpt-00000-of-00001.jsonl"
 
+MMLU_PRO_NON_MATH = ["biology", "business", "chemistry", "computer science", "economics", "engineering",
+                     "health", "history", "law", "other", "philosophy", "physics", "psychology"]
 TASK_OF_SOURCE = {
     "livebench-math": "math",
     "mmlu-pro-math": "math",
     "livecodebench": "code",
+    "livebench-reasoning": "reasoning",
+    **{f"mmlu-pro-{subject}": "knowledge" for subject in MMLU_PRO_NON_MATH},
 }
-EXPECTED_COUNTS = {"livebench-math": 56, "mmlu-pro-math": 11, "livecodebench": 42}
+EXPECTED_COUNTS = {"livebench-math": 56, "mmlu-pro-math": 11, "livecodebench": 42, "livebench-reasoning": 98,
+                   **{f"mmlu-pro-{subject}": 11 for subject in MMLU_PRO_NON_MATH}}
+TASKS = ["math", "code", "reasoning", "knowledge"]
+DEFAULT_TASKS = "math,code"
 TRUNC_MARKER = "\n...[truncated]"
 
 # Prompts. POINTWISE_TEMPLATE should be replaced by the qjudge prompt once that repo is available.
@@ -86,25 +97,27 @@ CALIBRATION = {
 
 # ---------------------------------------------------------------- data
 
-def load_items(data_path, limit, seed):
+def load_items(data_path, limit, seed, tasks=("math", "code")):
     with open(data_path, encoding="utf-8") as f:
         rows = [json.loads(line) for line in f if line.strip()]
-    items = [dict(r, task=TASK_OF_SOURCE[r["source"]]) for r in rows if r["source"] in TASK_OF_SOURCE]
+    items = [dict(r, task=TASK_OF_SOURCE[r["source"]]) for r in rows
+             if TASK_OF_SOURCE.get(r["source"]) in tasks]
     counts = Counter(r["source"] for r in items)
-    if dict(counts) != EXPECTED_COUNTS:
-        raise SystemExit(f"Unexpected source counts {dict(counts)}, expected {EXPECTED_COUNTS}")
+    expected = {k: v for k, v in EXPECTED_COUNTS.items() if TASK_OF_SOURCE[k] in tasks}
+    if dict(counts) != expected:
+        raise SystemExit(f"Unexpected source counts {dict(counts)}, expected {expected}")
     for r in items:
         if r["label"] not in ("A>B", "B>A"):
             raise SystemExit(f"Unexpected label {r['label']!r} for {r['pair_id']}")
     items.sort(key=lambda r: r["pair_id"])
     if limit:
-        # stratified: half math, half code, fixed seed
+        # stratified: equal share per task (remainder to the first tasks), fixed seed
         rng = random.Random(seed)
-        n_math = limit // 2
-        math_items = [r for r in items if r["task"] == "math"]
-        code_items = [r for r in items if r["task"] == "code"]
-        items = rng.sample(math_items, n_math) + rng.sample(code_items, limit - n_math)
-        assert Counter(r["task"] for r in items) == Counter({"math": n_math, "code": limit - n_math})
+        picked = []
+        for i, task in enumerate(tasks):
+            n = limit // len(tasks) + (i < limit % len(tasks))
+            picked += rng.sample([r for r in items if r["task"] == task], n)
+        items = picked
     return items
 
 
@@ -158,20 +171,22 @@ class Judge:
         if budget <= 0:
             raise ValueError("Question + instruction alone exceed max_len")
         keep = {k: len(v) for k, v in resp_ids.items()}
-        while sum(keep.values()) > budget:
-            # trim the currently longest response by one token (water-filling)
-            k = max(keep, key=keep.get)
-            keep[k] -= 1
-        cut = {k: len(resp_ids[k]) - keep[k] for k in resp_ids}
-        texts = {
-            k: responses[k] if cut[k] == 0 else self.tok.decode(resp_ids[k][: keep[k]]) + TRUNC_MARKER
-            for k in responses
-        }
-        chat = self.format_chat(template.format(question=question, **texts))
-        n = self.n_tokens(chat)
-        if n > self.max_len:  # decode/re-encode can shift boundaries slightly
-            raise ValueError(f"Prompt still {n} > {self.max_len} tokens after truncation")
-        return chat, cut, n
+        for _ in range(5):
+            while sum(keep.values()) > budget:
+                # trim the currently longest response by one token (water-filling)
+                k = max(keep, key=keep.get)
+                keep[k] -= 1
+            cut = {k: len(resp_ids[k]) - keep[k] for k in resp_ids}
+            texts = {
+                k: responses[k] if cut[k] == 0 else self.tok.decode(resp_ids[k][: keep[k]]) + TRUNC_MARKER
+                for k in responses
+            }
+            chat = self.format_chat(template.format(question=question, **texts))
+            n = self.n_tokens(chat)
+            if n <= self.max_len:
+                return chat, cut, n
+            budget -= n - self.max_len  # decode/re-encode can shift boundaries slightly
+        raise ValueError(f"Prompt still {n} > {self.max_len} tokens after truncation")
 
     def next_logits(self, chat_text):
         torch = self.torch
@@ -333,7 +348,7 @@ def summarize(records, n_boot, seed):
         if not recs:
             continue
         out[mode] = {}
-        for group in ["all", "math", "code"]:
+        for group in ["all"] + TASKS:
             sub = recs if group == "all" else [r for r in recs if r["task"] == group]
             if not sub:
                 continue
@@ -348,7 +363,8 @@ def summarize(records, n_boot, seed):
 
 def write_markdown(path, meta, summary):
     lines = [f"# JudgeBench eval: {meta['run_name']}", ""]
-    lines += [f"- model: `{meta['model_path']}` ({meta['dtype']}, grid {meta.get('grid', 'bf16')}), "
+    lines += [f"- model: `{meta['model_path']}` ({meta['dtype']}, grid {meta.get('grid', 'bf16')}, "
+              f"method {meta.get('method', 'rtn')}), tasks {meta.get('tasks', DEFAULT_TASKS)}, "
               f"GPU: {meta.get('gpu')}",
               f"- items: {meta['n_items']} pairs, max_len {meta['max_len']}, "
               f"bootstrap {meta['n_boot']} resamples clustered by original_id (pair_id if null)",
@@ -380,7 +396,8 @@ def main():
     ap.add_argument("--data-path", default=DEFAULT_DATA)
     ap.add_argument("--dtype", choices=["bfloat16", "float16"], default="bfloat16")
     ap.add_argument("--max-len", type=int, default=8192)
-    ap.add_argument("--limit", type=int, default=0, help="stratified math/code subsample; 0 = all 109")
+    ap.add_argument("--tasks", default=DEFAULT_TASKS, help=f"comma list of {TASKS}")
+    ap.add_argument("--limit", type=int, default=0, help="subsample stratified by task; 0 = all pairs")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--run-name", default=None)
@@ -388,21 +405,33 @@ def main():
     ap.add_argument("--summarize-only", action="store_true", help="recompute summary from items.jsonl")
     ap.add_argument("--grid", default="bf16",
                     help="weight grid from quant_grids.py: bf16 (default), g00..g15 (INT4), i8g00..i8g15 (INT8)")
+    ap.add_argument("--method", choices=["rtn", "gptq", "mnr"], default="rtn",
+                    help="rounding on the grid: rtn (nearest), gptq, mnr (margin-neutral); see quant_methods.py")
+    ap.add_argument("--calib-samples", type=int, default=128, help="gptq/mnr: wikitext-2 windows of 512 tokens")
+    ap.add_argument("--tune-problems", type=int, default=32, help="mnr: S9 development problems for tuning")
     args = ap.parse_args()
     parse_grid(args.grid)  # fail fast on a bad name
+    tasks = args.tasks.split(",")
+    if not tasks or any(t not in TASKS for t in tasks):
+        raise SystemExit(f"--tasks must be a comma list of {TASKS}")
     if args.grid != "bf16" and args.dtype != "bfloat16":
         raise SystemExit("--grid rounds from the BF16 weights; use --dtype bfloat16")
+    if args.method != "rtn" and args.grid == "bf16":
+        raise SystemExit(f"--method {args.method} needs a --grid")
 
     modes = ["pointwise", "pairwise"] if args.mode == "both" else [args.mode]
     model_tag = Path(args.model_path).name.lower()
-    grid_tag = "" if args.grid == "bf16" else f"_{args.grid}"
-    run_name = args.run_name or f"jb_{model_tag}_{args.dtype}{grid_tag}_{args.mode}_n{args.limit or 'all'}"
+    grid_tag = ("" if args.grid == "bf16" else f"_{args.grid}" if args.method == "rtn"
+                else f"_{args.method}-{args.grid}")
+    task_tag = "" if args.tasks == DEFAULT_TASKS else "_" + "-".join(tasks)
+    run_name = args.run_name or (f"jb_{model_tag}_{args.dtype}{grid_tag}{task_tag}_{args.mode}"
+                                 f"_n{args.limit or 'all'}")
     run_dir = Path(args.out_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     items_path = run_dir / "items.jsonl"
     meta_path = run_dir / "meta.json"
 
-    items = load_items(args.data_path, args.limit, args.seed)
+    items = load_items(args.data_path, args.limit, args.seed, tasks)
     print(f"[data] {len(items)} pairs: {dict(Counter(r['task'] for r in items))}", flush=True)
 
     done = set()
@@ -414,11 +443,13 @@ def main():
     print(f"[resume] {len(done)} (pair, mode) records already in {items_path}", flush=True)
 
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-    if meta and meta.get("grid", "bf16") != args.grid:
-        raise SystemExit(f"{run_dir} was run with grid {meta.get('grid', 'bf16')}, not {args.grid}; "
-                         "use a new --run-name.")
+    for key, default, new in [("grid", "bf16", args.grid), ("method", "rtn", args.method),
+                              ("tasks", DEFAULT_TASKS, args.tasks)]:
+        if meta and meta.get(key, default) != new:
+            raise SystemExit(f"{run_dir} was run with {key} {meta.get(key, default)}, not {new}; "
+                             "use a new --run-name.")
     meta.update({
-        "grid": args.grid,
+        "grid": args.grid, "method": args.method, "tasks": args.tasks,
         "run_name": run_name, "model_path": args.model_path, "data_path": args.data_path,
         "dtype": args.dtype, "max_len": args.max_len, "limit": args.limit, "seed": args.seed,
         "n_boot": args.n_boot, "n_items": len(items), "modes": modes,
@@ -434,14 +465,20 @@ def main():
         import torch
         import transformers
         judge = Judge(args.model_path, args.dtype, args.max_len)
-        if args.grid != "bf16":
+        if args.grid != "bf16" and args.method == "rtn":
             linears = target_linears(judge.model)
-            original = {n: m.weight.detach().clone() for n, m in linears}
-            meta["weight_err_over_scale"] = apply_grid(linears, original, args.grid)
-            del original
-            torch.cuda.empty_cache()
+            # in place: each weight is rounded from itself
+            meta["weight_err_over_scale"] = apply_grid(linears, {n: m.weight for n, m in linears}, args.grid)
             print(f"[grid] {args.grid}: {len(linears)} linear layers rounded, "
                   f"max err/s {meta['weight_err_over_scale']:.3f}", flush=True)
+        elif args.grid != "bf16":
+            from quant_methods import Calibrated
+            ctx = Calibrated(judge, args.method, calib_samples=args.calib_samples,
+                             tune_problems=args.tune_problems)
+            meta["quant"] = dict(ctx.meta, **ctx.quantize(judge, args.grid))
+            del ctx
+            torch.cuda.empty_cache()
+            print(f"[grid] {args.method} {args.grid}: {json.dumps(meta['quant'])}", flush=True)
         meta.update({"torch": torch.__version__, "transformers": transformers.__version__,
                      "gpu": torch.cuda.get_device_name(0), "python": sys.version.split()[0]})
         labels = meta.setdefault("labels", {})

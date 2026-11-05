@@ -1,7 +1,8 @@
 """S9: score the injection set at BF16 and on 16 offset-shifted INT4 grids.
 
 Grids: see quant_grids.py (INT4 g00..g15, same scale and worst-case error, only the offset
-differs; optional INT8 control i8g00..i8g15 with the same construction).
+differs; optional INT8 control i8g00..i8g15 with the same construction). --method picks how weights
+are rounded on each grid: rtn (nearest, default), gptq or mnr (margin-neutral); see quant_methods.py.
 
 Output: results/<run>/items.jsonl, one row per (grid, item) in the format s9_lottery_stats.py reads,
 plus meta.json (label tokens, per-grid weight error). Resumable per grid.
@@ -51,6 +52,9 @@ def main():
     ap.add_argument("--int8-grids", type=int, default=0, help="INT8 control grids i8g00..i8g(N-1)")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--max-len", type=int, default=2048)
+    ap.add_argument("--method", choices=["rtn", "gptq", "mnr"], default="rtn")
+    ap.add_argument("--calib-samples", type=int, default=128, help="gptq/mnr: wikitext-2 windows of 512 tokens")
+    ap.add_argument("--tune-problems", type=int, default=32, help="mnr: S9 development problems for tuning")
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--out-dir", default=str(HERE / "results"))
     args = ap.parse_args()
@@ -67,7 +71,7 @@ def main():
         raise SystemExit("no items selected")
 
     model_tag = Path(args.model_path).name.lower()
-    run_name = args.run_name or f"s9_{model_tag}"
+    run_name = args.run_name or f"s9_{model_tag}" + ("" if args.method == "rtn" else f"_{args.method}")
     run_dir = Path(args.out_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     rows_path, meta_path = run_dir / "items.jsonl", run_dir / "meta.json"
@@ -83,7 +87,9 @@ def main():
           f"grids done {sorted(done)}, todo {todo}", flush=True)
 
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-    meta.update({"run_name": run_name, "model_path": args.model_path, "items": args.items,
+    if meta and meta.get("method", "rtn") != args.method:
+        raise SystemExit(f"{run_dir} was run with method {meta.get('method', 'rtn')}; use a new --run-name.")
+    meta.update({"method": args.method,"run_name": run_name, "model_path": args.model_path, "items": args.items,
                  "partitions": args.partitions, "limit_problems": args.limit_problems,
                  "n_items": len(items), "group_size": GROUP, "n_grids": args.grids,
                  "n_int8_grids": args.int8_grids,
@@ -100,14 +106,29 @@ def main():
         chats = [judge.build(POINTWISE_TEMPLATE, it["question"], {"response": it["response"]})[0]
                  for it in items]
         linears = target_linears(judge.model)
-        original = {n: m.weight.detach().clone() for n, m in linears}
         meta.setdefault("weight_err_over_scale", {})
-        print(f"[model] {len(linears)} linear layers quantized per grid", flush=True)
+        if args.method == "rtn":
+            original = {n: m.weight.detach().clone() for n, m in linears}
+        else:
+            from quant_methods import Calibrated
+            original = {n: m.weight.detach().to("cpu") for n, m in linears}
+            ctx = Calibrated(judge, args.method, calib_samples=args.calib_samples,
+                             tune_problems=args.tune_problems, batch_size=args.batch_size)
+            meta["calibration"] = ctx.meta
+            meta.setdefault("quant", {})
+        print(f"[model] {len(linears)} linear layers quantized per grid ({args.method})", flush=True)
 
         for grid in todo:
             t0 = time.time()
-            err = apply_grid(linears, original, grid)
-            if grid != "bf16":
+            if args.method == "rtn":
+                err = apply_grid(linears, original, grid)
+            else:
+                apply_grid(linears, original, "bf16")  # restore BF16 before rounding again
+                if grid != "bf16":
+                    meta["quant"][grid] = ctx.quantize(judge, grid)
+                    print(f"[quant] {grid}: {json.dumps(meta['quant'][grid])}", flush=True)
+                err = 0.0
+            if grid != "bf16" and args.method == "rtn":
                 meta["weight_err_over_scale"][grid] = err
             scores = score_all(judge, chats, args.batch_size)
             with rows_path.open("a", encoding="utf-8") as f:
