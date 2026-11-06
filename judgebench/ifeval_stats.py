@@ -17,7 +17,7 @@ response when margin > 0. Per condition, on the chosen partition(s):
 95% percentile bootstrap resampling prompts (--n-boot); paired differences vs BF16 use the same draws.
 Equivalence verdict per difference (q-judge core/metrics.py): equivalent if the CI lies inside
 +/- margin, different if it excludes 0, otherwise inconclusive. Margins (--margins) default to the
-team's exp2 values: accuracy 0.03, false_accept 0.05, auroc 0.05; balanced_accuracy 0.03 (proposed).
+team's exp2 values: accuracy 0.03, false_accept 0.05, auroc 0.05; balanced_accuracy 0.03 (pre-registered).
 
 Usage:
   python ifeval_stats.py --run results/ifeval_qwen3-4b --partitions discovery

@@ -1,9 +1,14 @@
 # IFEval pre-registration: quantized judges on instruction following (Jiayang)
 
-Status: **DRAFT, not yet frozen.** Set from discovery-partition runs only, then frozen (date + commit)
-before any development or locked analysis. Lines marked *(proposed)* still need Jiayang's OK.
+Status: **FROZEN.** Set from discovery-partition runs only, frozen before any development or locked
+analysis.
 
-- Freeze date: ____  Commit: ____
+- Freeze date: 2026-11-05. Commit: the commit "judgebench: freeze IFEval pre-registration"
+  (`git log -- docs/ifeval_preregistration.md`).
+- Rules agreed by Jiayang on 2026-11-05 (balanced-accuracy margin, H2 count, H3 rule).
+- Seen before freezing: discovery results of the team-protocol runs
+  (results/ifeval_team_<judge>/ifeval_stats_discovery.*; Slurm jobs 106199-106202). No development or
+  locked statistics had been computed.
 
 ## Question
 
@@ -47,7 +52,8 @@ tasks in the project abstract, using the team protocol of the q-judge repository
 
 Paired difference vs the same judge's BF16, locked partition, 95% percentile bootstrap resampling
 prompts (2000 resamples). Margins: accuracy 3 points, false acceptance 5 points, AUROC 0.05 (team);
-balanced accuracy 3 points *(proposed: the team has no balanced-accuracy margin; same as accuracy)*.
+balanced accuracy 3 points (the team has no balanced-accuracy margin; same as accuracy, since both are
+the share of verdicts right).
 
 - **equivalent**: the whole CI lies inside +/- margin;
 - **different**: the CI excludes 0 (either direction);
@@ -57,12 +63,13 @@ balanced accuracy 3 points *(proposed: the team has no balanced-accuracy margin;
 
 - **H1 (INT8 is safe):** for every judge, `tao_w8` is *equivalent* to BF16 on accuracy, balanced
   accuracy and false acceptance.
-- **H2 (INT4 RTN changes the judge), two-sided:** for at least 2 of 4 judges *(proposed)*, `tao_w4`
+- **H2 (INT4 RTN changes the judge), two-sided:** for at least 2 of 4 judges, `tao_w4`
   is *different* from BF16 on false acceptance or on false rejection, in either direction. The
   direction is reported per judge.
 - **H3 (calibrated rounding keeps INT4 equivalent):** for each judge where H2 holds, `gptq_w4` and
-  `mnr_w4` are each *equivalent* to BF16 on false acceptance (+/- 5 points) *(proposed)*.
-  Secondary: share of the `tao_w4` false-acceptance shift removed (point estimate).
+  `mnr_w4` are each *equivalent* to BF16 on false acceptance (+/- 5 points).
+  Reported alongside, not pass/fail: share of the `tao_w4` false-acceptance shift removed (point
+  estimate).
 
 ## Secondary (descriptive, no pass/fail)
 
