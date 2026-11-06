@@ -24,6 +24,14 @@ become a qjudge stage once that repo lands.
 | `jobs/jb_methods_smoke.sbatch` | smoke test of knowledge + reasoning and of gptq / mnr (4 pairs, small calibration), plus S9 mnr scoring on 2 grids |
 | `jobs/jb_methods.sbatch` | one judge on `TASKS` (default reasoning): BF16, INT8 RTN, INT4 RTN / GPTQ / MNR on grid `GRID` (default 00), H100 |
 | `jobs/jb_grids.sbatch` | all 109 pairs on each grid (default the 16 INT4 grids; `GRIDS="i8g00 ..."` overrides) |
+| `ifeval_generate.py` | IFEval step 1 (GPU): Qwen3-1.7B and SmolLM2-1.7B, 4 sampled responses per prompt, labeled with the official strict/loose checker |
+| `ifeval_build.py` | IFEval step 2 (CPU): judge set without labels (`items.jsonl`), hidden audit (`audit.jsonl`), "verified" note add-on (`notes.jsonl`), hash partitions |
+| `ifeval_score.py` | IFEval step 3 (GPU): pointwise margins of each judge under each condition (`bf16`, `i8g00`, `g00`, `gptq-g00`, `mnr-g00`) |
+| `ifeval_stats.py` | IFEval step 4 (CPU): accuracy, false acceptance, balanced accuracy, AUROC, best-of-N, note add-on; paired bootstrap vs BF16 over prompts |
+| `jobs/ifeval_generate.sbatch`, `jobs/ifeval_score.sbatch` | generation + build; scoring + stats for one judge (`MODEL=...`, `EXTRA=--with-notes`) |
+| `docs/ifeval_preregistration.md` | IFEval hypotheses and pass/fail rules (draft; freeze before development/locked analysis) |
+| `third_party/instruction_following_eval/` | Google's official IFEval checker (Apache-2.0), see `third_party/README.md` |
+| `jb_think.py`, `jobs/jb_think.sbatch` | exploratory thinking-on check: greedy reasoning (budget 4096), then the margin after `</think>` |
 | `results/<run>/` | `items.jsonl` (one line per pair x mode), `meta.json`, `summary.json`, `summary.md` |
 | `docs/jb_mathcode_pair_ids.tsv` | the 109 pair ids (56 livebench-math, 11 mmlu-pro-math, 42 livecodebench) |
 | `notebooks/` | earlier generation-based A/B pilot (superseded by `jb_eval.py`) |

@@ -138,21 +138,28 @@ def gptq_quantize(W, H, s, off, levels, percdamp=0.01, blocksize=GROUP):
     H = H.clone()
     out_f, in_f = W.shape
     S, OFF = s[..., 0], off[..., 0]  # (out, in / GROUP)
+    if not torch.isfinite(H).all():
+        raise RuntimeError(f"GPTQ: Hessian has {int((~torch.isfinite(H)).sum())} non-finite entries")
     dead = torch.diag(H) == 0
     H[dead, dead] = 1
     damp = percdamp * torch.mean(torch.diag(H))
     eye = torch.arange(in_f, device=W.device)
-    for attempt in range(5):
-        try:
-            Hd = H.clone()
+    Hinv = None
+    # fp32 first (as before); float64 only if fp32 Cholesky fails, then cast back
+    for dtype in (torch.float32, torch.float64):
+        for attempt in range(5):
+            Hd = H.to(dtype)
             Hd[eye, eye] += damp * 10 ** attempt
-            L = torch.linalg.cholesky(Hd)
-            Hinv = torch.linalg.cholesky(torch.cholesky_inverse(L), upper=True)
+            L, info = torch.linalg.cholesky_ex(Hd)
+            if info == 0:
+                Hi, info = torch.linalg.cholesky_ex(torch.cholesky_inverse(L), upper=True)
+                if info == 0 and torch.isfinite(Hi).all():
+                    Hinv = Hi.float()
+                    break
+        if Hinv is not None:
             break
-        except RuntimeError:  # not positive definite: raise damping
-            continue
-    else:
-        raise RuntimeError("GPTQ: Hessian not positive definite even with 1e4 x damping")
+    if Hinv is None:
+        raise RuntimeError("GPTQ: Hessian not positive definite even with 1e4 x damping in float64")
     Q = torch.zeros_like(W)
     for i1 in range(0, in_f, blocksize):
         i2 = min(i1 + blocksize, in_f)
@@ -268,7 +275,10 @@ def gptq_pass(model, calib_inputs, bits, g, grads=None, k=262144, percdamp=0.01)
             for n, m in subset:
                 W0 = m.weight.data.float()
                 s, off = grid_params(m.weight.data, g, bits)
-                Q = gptq_quantize(W0, H[n], s, off, levels, percdamp)
+                try:
+                    Q = gptq_quantize(W0, H[n], s, off, levels, percdamp)
+                except RuntimeError as e:
+                    raise RuntimeError(f"{names[id(m)]}: {e}") from e
                 if grads is not None:
                     G = grads[names[id(m)]].to(W0.device).float()
                     for d, c in flip_candidates(W0, Q, H[n], G, s, off, levels, k).items():

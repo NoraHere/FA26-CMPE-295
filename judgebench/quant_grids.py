@@ -72,7 +72,8 @@ def apply_grid(linears, original, name):
             if spec is None:
                 m.weight.copy_(original[n])
             else:
-                deq, e = fake_quant(original[n], spec[1], spec[0])
+                # round on the layer's device even when the originals are kept on the CPU
+                deq, e = fake_quant(original[n].to(m.weight.device), spec[1], spec[0])
                 m.weight.copy_(deq)
                 errs.append(e)
     return max(errs)
