@@ -1,13 +1,22 @@
 """IFEval step 3 (GPU): score every judge-set response under each precision / rounding condition.
 
-Pointwise, same protocol as jb_eval (thinking off, no sampling, first-token
-logit(CORRECT) - logit(INCORRECT), label tokens from jb_eval's calibration prompts on the BF16 judge),
-with an instruction-following prompt. Labels (audit.jsonl) are never read here.
+Pointwise, team protocol (q-judge core/judge.py): system + user prompt, thinking off, no sampling,
+first-token logit(CORRECT) - logit(INCORRECT); label tokens from jb_eval's calibration prompts on the
+BF16 judge. Labels (audit.jsonl) are never read here.
 
-Conditions (--conditions): bf16, RTN grids (g00, i8g00, ... from quant_grids.py) and calibrated
-rounding on a grid (gptq-g00, mnr-g00, see quant_methods.py). Every condition starts from the BF16
-weights. Output: results/<run>/scores.jsonl rows {cond, item_id, margin, label_mass}; resumable per
-condition. --with-notes also scores data/ifeval/notes.jsonl (add-on).
+Conditions (--conditions):
+  primary, the team's versions (q-judge):
+    bf16
+    tao_w8, tao_w4   torchao Int8/Int4 weight-only, group 128, lm_head excluded (real kernels)
+    rtn_w4           q-judge simquant grid (min-max incl. 0, scale range/15, integer zero), fake quant
+    gptq_w4          q-judge GPTQ on that grid; calibration = judge-format IFEval development prompts
+    mnr_w4           gptq_w4 + margin-neutral flips tuned on IFEval development notes
+  secondary, ours:
+    i8g00, g00       offset-shifted RTN grids (quant_grids.py)
+    gptq-g00, mnr-g00  GPTQ / MNR on grid g00 with wikitext-2 calibration and S9 tuning
+Every condition starts from the BF16 weights. Output: results/<run>/scores.jsonl rows
+{cond, item_id, margin, label_mass}; resumable per condition. --with-notes also scores
+data/ifeval/notes.jsonl (add-on).
 
 Usage (GPU node only):
   python ifeval_score.py --model-path ~/models/Qwen3-4B --limit-items 16    # smoke
@@ -16,33 +25,94 @@ Usage (GPU node only):
 
 import argparse
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 
 from quant_grids import apply_grid, parse_grid, target_linears
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CONDITIONS = "bf16,i8g00,g00,gptq-g00,mnr-g00"
+DEFAULT_CONDITIONS = "bf16,tao_w8,tao_w4,rtn_w4,gptq_w4,mnr_w4,i8g00,g00,gptq-g00"
+TEAM = {"tao_w8": ("tao", 8), "tao_w4": ("tao", 4), "rtn_w4": ("team_rtn", 4), "rtn_w8": ("team_rtn", 8),
+        "gptq_w4": ("team_gptq", 4), "mnr_w4": ("team_mnr", 4)}
+CALIB_MAXLEN = 1024  # q-judge simquant.py
 
-IF_TEMPLATE = """You are grading whether a response follows the user's instructions.
+IF_SYSTEM = ("You are a strict grader of instruction following. Decide whether the candidate response "
+             "follows every instruction in the user's request exactly. "
+             "Reply with exactly one word: CORRECT or INCORRECT.")
 
-Instructions given to the assistant:
+IF_TEMPLATE = """Instructions:
 {question}
 
-Response:
+Candidate response:
 {response}
 
-Does the response follow every instruction above exactly? Answer with exactly one word: CORRECT or INCORRECT."""
+Does the candidate response follow every instruction exactly? Reply with exactly one word: CORRECT or INCORRECT."""
 
 
 def parse_condition(cond):
-    """'gptq-g00' -> ('gptq', 'g00'); 'g00' -> ('rtn', 'g00'); 'bf16' -> ('rtn', 'bf16')."""
+    """-> (kind, arg): ('rtn', grid) | ('gptq'|'mnr', grid) | (team kind, bits)."""
+    if cond in TEAM:
+        return TEAM[cond]
     method, _, grid = cond.rpartition("-")
     method = method or "rtn"
     if method not in ("rtn", "gptq", "mnr") or (method != "rtn" and grid == "bf16"):
         raise ValueError(f"bad condition {cond!r}")
     parse_grid(grid)
     return method, grid
+
+
+def load_tao(model_path, bits):
+    """The team's tao_w8 / tao_w4 (q-judge core/judge.py), loaded as a second model."""
+    import torch
+    from transformers import AutoModelForCausalLM, TorchAoConfig
+    from torchao.quantization import Int4WeightOnlyConfig, Int8WeightOnlyConfig
+    cfg = Int4WeightOnlyConfig(group_size=128) if bits == 4 else Int8WeightOnlyConfig(group_size=128)
+    return AutoModelForCausalLM.from_pretrained(
+        model_path, dtype=torch.bfloat16, device_map={"": 0}, local_files_only=True,
+        quantization_config=TorchAoConfig(quant_type=cfg, modules_to_not_convert=["lm_head"])).eval()
+
+
+def dev_calibration(judge, d, n):
+    """q-judge recipe on IFEval: n judge-format development items spread over the sorted ids, each
+    rendered with the judge's chat template and cut to CALIB_MAXLEN tokens."""
+    with (d / "items.jsonl").open(encoding="utf-8") as f:
+        rows = sorted((r for r in map(json.loads, f) if r["partition"] == "development"),
+                      key=lambda r: r["item_id"])
+    rows = rows[::max(1, len(rows) // n)][:n]
+    ids = []
+    for r in rows:
+        chat = judge.format_chat(IF_TEMPLATE.format(question=r["question"], response=r["response"]))
+        ids.append(judge.torch.tensor(judge.tok(chat, add_special_tokens=False).input_ids[:CALIB_MAXLEN]))
+    return ids, [r["item_id"] for r in rows]
+
+
+def dev_tuning(judge, d, n_prompts, batch_size):
+    """MNR tuning set: rule-breaking development responses with and without the note, first n prompts."""
+    from quant_methods import Tuning
+    with (d / "items.jsonl").open(encoding="utf-8") as f:
+        items = {r["item_id"]: r for r in map(json.loads, f) if r["partition"] == "development"}
+    with (d / "notes.jsonl").open(encoding="utf-8") as f:
+        notes = sorted((r for r in map(json.loads, f) if r["note_of"] in items), key=lambda r: r["item_id"])
+    keys = sorted({r["key"] for r in notes})[:n_prompts]
+    notes = [r for r in notes if r["key"] in keys]
+    chats, pairs = [], []
+    for r in notes:
+        base = items[r["note_of"]]
+        for row in (r, base):
+            chats.append(judge.build(IF_TEMPLATE, row["question"], {"response": row["response"]})[0])
+        pairs.append((len(chats) - 2, len(chats) - 1))
+    return Tuning.from_chats(chats, pairs, len(keys), batch_size, "ifeval development notes")
+
+
+def git_rev():
+    try:
+        rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=HERE, text=True).strip()
+        dirty = subprocess.call(["git", "diff", "--quiet", "HEAD", "--", "."], cwd=HERE) != 0
+        return rev + ("-dirty" if dirty else "")
+    except Exception:
+        return None
 
 
 def main():
@@ -55,7 +125,7 @@ def main():
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-len", type=int, default=4096)
     ap.add_argument("--calib-samples", type=int, default=128)
-    ap.add_argument("--tune-problems", type=int, default=32)
+    ap.add_argument("--tune-problems", type=int, default=32, help="mnr tuning: S9 problems / IFEval prompts")
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--out-dir", default=str(HERE / "results"))
     args = ap.parse_args()
@@ -72,7 +142,7 @@ def main():
         items += sub[:args.limit_items] if args.limit_items else sub
 
     model_tag = Path(args.model_path).name.lower()
-    run_dir = Path(args.out_dir) / (args.run_name or f"ifeval_{model_tag}" + ("_smoke" if args.limit_items else ""))
+    run_dir = Path(args.out_dir) / (args.run_name or f"ifeval_team_{model_tag}" + ("_smoke" if args.limit_items else ""))
     run_dir.mkdir(parents=True, exist_ok=True)
     out_path, meta_path = run_dir / "scores.jsonl", run_dir / "meta.json"
     done = {}
@@ -86,7 +156,10 @@ def main():
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     meta.update({"model_path": args.model_path, "data_dir": args.data_dir, "files": files,
                  "n_items": len(items), "conditions": conds, "max_len": args.max_len,
-                 "template": IF_TEMPLATE, "build_meta": json.loads((d / "build_meta.json").read_text())["sha256"]})
+                 "system": IF_SYSTEM, "template": IF_TEMPLATE,
+                 "build_meta": json.loads((d / "build_meta.json").read_text())["sha256"]})
+    meta.setdefault("provenance", []).append({"git": git_rev(), "slurm_job": os.environ.get("SLURM_JOB_ID"),
+                                              "todo": todo, "time": time.strftime("%Y-%m-%d %H:%M:%S")})
 
     if todo:
         import torch
@@ -96,9 +169,15 @@ def main():
 
         judge = Judge(args.model_path, "bfloat16", args.max_len)
         judge.tok.padding_side = "left"
-        meta["labels"] = {"pointwise": judge.calibrate("pointwise")}
+        meta["labels"] = {"pointwise": judge.calibrate("pointwise")}  # jb_eval probes, as before
+        judge.system = IF_SYSTEM
+        try:
+            import torchao
+            tao_version = torchao.__version__
+        except ImportError:
+            tao_version = None
         meta.update({"torch": torch.__version__, "transformers": transformers.__version__,
-                     "gpu": torch.cuda.get_device_name(0)})
+                     "torchao": tao_version, "gpu": torch.cuda.get_device_name(0)})
         built = [judge.build(IF_TEMPLATE, it["question"], {"response": it["response"]}) for it in items]
         meta["n_truncated"] = sum(cut["response"] > 0 for _, cut, _ in built)
         # score in length order (less padding), write in item order
@@ -110,18 +189,48 @@ def main():
         meta.setdefault("quant", {})
         for cond in todo:
             t0 = time.time()
-            method, grid = parse_condition(cond)
+            kind, arg = parse_condition(cond)
             apply_grid(linears, original, "bf16")
-            if method == "rtn":
-                meta["quant"][cond] = {"weight_err_over_scale": apply_grid(linears, original, grid)}
+            bf16_model = None
+            if kind == "rtn":
+                meta["quant"][cond] = {"weight_err_over_scale": apply_grid(linears, original, arg)}
+            elif kind == "tao":
+                before = torch.cuda.memory_allocated()
+                bf16_model, judge.model = judge.model, load_tao(args.model_path, arg)
+                meta["quant"][cond] = {"toolchain": "torchao", "bits": arg, "group_size": 128, "excluded": ["lm_head"],
+                                       "weight_mem_mib": (torch.cuda.memory_allocated() - before) >> 20}
+            elif kind == "team_rtn":
+                from quant_methods import team_rtn
+                with torch.no_grad():
+                    for n, m in linears:
+                        m.weight.copy_(team_rtn(original[n].to(m.weight.device), arg).to(m.weight.dtype))
+                meta["quant"][cond] = {"grid": "q-judge simquant min-max incl. 0, integer zero", "bits": arg}
             else:
-                if method not in ctxs:
-                    from quant_methods import Calibrated
-                    apply_grid(linears, original, "bf16")
-                    ctxs[method] = Calibrated(judge, method, calib_samples=args.calib_samples,
-                                              tune_problems=args.tune_problems)
-                meta["quant"][cond] = dict(ctxs[method].meta, **ctxs[method].quantize(judge, grid))
+                from quant_methods import Calibrated
+                team = kind.startswith("team_")
+                method = kind.replace("team_", "")
+                key = kind
+                if key not in ctxs:
+                    if team:
+                        calib_ids, calib_items = dev_calibration(judge, d, args.calib_samples)
+                        tuning = dev_tuning(judge, d, args.tune_problems, 8) if method == "mnr" else None
+                        ctxs[key] = Calibrated(judge, method, calib_ids=calib_ids, tuning=tuning,
+                                               calib_desc=f"ifeval development, judge format, <= {CALIB_MAXLEN} tokens")
+                        ctxs[key].meta["calib_item_ids"] = calib_items
+                    else:  # S9 tuning chats use jb_eval's math prompt, without the IFEval system line
+                        judge.system = None
+                        try:
+                            ctxs[key] = Calibrated(judge, method, calib_samples=args.calib_samples,
+                                                   tune_problems=args.tune_problems)
+                        finally:
+                            judge.system = IF_SYSTEM
+                q = ctxs[key].quantize(judge, None, team_bits=arg) if team else ctxs[key].quantize(judge, arg)
+                meta["quant"][cond] = dict(ctxs[key].meta, **q)
             scores = score_all(judge, chats, args.batch_size)
+            if bf16_model is not None:
+                del judge.model
+                judge.model = bf16_model
+                torch.cuda.empty_cache()
             by_item = [None] * len(items)
             for pos, i in enumerate(order):
                 by_item[i] = scores[pos]

@@ -63,6 +63,13 @@ class Tuning:
         self.n_problems = len(pids)
         self.batch_size = batch_size
 
+    @classmethod
+    def from_chats(cls, chats, pairs, n_problems, batch_size, source):
+        """Tuning set from built chats and (note index, base index) pairs, e.g. IFEval development notes."""
+        t = cls.__new__(cls)
+        t.chats, t.pairs, t.n_problems, t.batch_size, t.source = chats, pairs, n_problems, batch_size, source
+        return t
+
     def note_effect(self, judge):
         from s9_score_grids import score_all
         side, judge.tok.padding_side = judge.tok.padding_side, "left"
@@ -131,21 +138,20 @@ def note_effect_grads(judge, tuning, batch_size):
 
 # ---------------------------------------------------------------- GPTQ
 
-def gptq_quantize(W, H, s, off, levels, percdamp=0.01, blocksize=GROUP):
-    """GPTQ of a (out, in) float weight on fixed per-group grid (s, off); returns the dequantized weight."""
+def hessian_inverse(W, H, percdamp=0.01):
+    """Upper Cholesky factor of the damped inverse Hessian (as in GPTQ). Dead input columns (zero
+    diagonal) get H = 1 and their weights are zeroed in W (in place), as in q-judge simquant.py."""
     import torch
-    W = W.clone()
     H = H.clone()
-    out_f, in_f = W.shape
-    S, OFF = s[..., 0], off[..., 0]  # (out, in / GROUP)
+    in_f = H.shape[0]
     if not torch.isfinite(H).all():
         raise RuntimeError(f"GPTQ: Hessian has {int((~torch.isfinite(H)).sum())} non-finite entries")
     dead = torch.diag(H) == 0
     H[dead, dead] = 1
+    W[:, dead] = 0
     damp = percdamp * torch.mean(torch.diag(H))
-    eye = torch.arange(in_f, device=W.device)
-    Hinv = None
-    # fp32 first (as before); float64 only if fp32 Cholesky fails, then cast back
+    eye = torch.arange(in_f, device=H.device)
+    # fp32 first; float64 only if the fp32 Cholesky fails, then cast back
     for dtype in (torch.float32, torch.float64):
         for attempt in range(5):
             Hd = H.to(dtype)
@@ -154,12 +160,73 @@ def gptq_quantize(W, H, s, off, levels, percdamp=0.01, blocksize=GROUP):
             if info == 0:
                 Hi, info = torch.linalg.cholesky_ex(torch.cholesky_inverse(L), upper=True)
                 if info == 0 and torch.isfinite(Hi).all():
-                    Hinv = Hi.float()
-                    break
-        if Hinv is not None:
-            break
-    if Hinv is None:
-        raise RuntimeError("GPTQ: Hessian not positive definite even with 1e4 x damping in float64")
+                    return Hi.float()
+    raise RuntimeError("GPTQ: Hessian not positive definite even with 1e4 x damping in float64")
+
+
+def team_grid(w, bits):
+    """q-judge's grid (core/simquant.py grid_params) for (rows, GROUP) blocks: asymmetric min-max with
+    the range widened to include 0, scale = range / (2^bits - 1), integer zero point."""
+    import torch
+    qmax = 2 ** bits - 1
+    lo = w.min(dim=1, keepdim=True).values.clamp(max=0)
+    hi = w.max(dim=1, keepdim=True).values.clamp(min=0)
+    scale = ((hi - lo) / qmax).clamp(min=1e-8)
+    return scale, torch.round(-lo / scale)
+
+
+def team_fake_quant(w, scale, zero, bits):
+    import torch
+    return scale * (torch.clamp(torch.round(w / scale) + zero, 0, 2 ** bits - 1) - zero)
+
+
+def team_rtn(W, bits):
+    """q-judge rtn_w4 / rtn_w8: round-to-nearest on team_grid, per group of GROUP input columns."""
+    W = W.float()
+    out = W.clone()
+    for c in range(0, W.shape[1], GROUP):
+        sc, z = team_grid(W[:, c:c + GROUP], bits)
+        out[:, c:c + GROUP] = team_fake_quant(W[:, c:c + GROUP], sc, z, bits)
+    return out
+
+
+def gptq_team(W, H, bits, percdamp=0.01):
+    """GPTQ as in q-judge simquant.py (gptq_w4): no act-order, blocks of GROUP columns, each group's grid
+    computed from the error-updated weights when the group starts. Returns (Q, s, off) with s, off shaped
+    (out, in / GROUP, 1) in this file's offset form (level k = off + k s, off = -zero s)."""
+    import torch
+    W = W.clone().float()
+    out_f, in_f = W.shape
+    Hinv = hessian_inverse(W, H, percdamp)
+    Q = torch.zeros_like(W)
+    S = torch.zeros(out_f, in_f // GROUP, 1, device=W.device)
+    OFF = torch.zeros_like(S)
+    for i1 in range(0, in_f, GROUP):
+        i2 = i1 + GROUP
+        W1 = W[:, i1:i2].clone()
+        Err1 = torch.zeros_like(W1)
+        Hinv1 = Hinv[i1:i2, i1:i2]
+        sc, z = team_grid(W1, bits)
+        S[:, i1 // GROUP], OFF[:, i1 // GROUP] = sc, -z * sc
+        for i in range(GROUP):
+            w = W1[:, i]
+            q = team_fake_quant(w.unsqueeze(1), sc, z, bits).flatten()
+            Q[:, i1 + i] = q
+            err = (w - q) / Hinv1[i, i]
+            W1[:, i:] -= err.unsqueeze(1) @ Hinv1[i, i:].unsqueeze(0)
+            Err1[:, i] = err
+        W[:, i2:] -= Err1 @ Hinv[i1:i2, i2:]
+    return Q, S, OFF
+
+
+def gptq_quantize(W, H, s, off, levels, percdamp=0.01, blocksize=GROUP):
+    """GPTQ of a (out, in) float weight on fixed per-group grid (s, off); returns the dequantized weight."""
+    import torch
+    W = W.clone()
+    out_f, in_f = W.shape
+    S, OFF = s[..., 0], off[..., 0]  # (out, in / GROUP)
+    Hinv = hessian_inverse(W, H, percdamp)
+
     Q = torch.zeros_like(W)
     for i1 in range(0, in_f, blocksize):
         i2 = min(i1 + blocksize, in_f)
@@ -243,11 +310,12 @@ def capture_inputs(model, calib):
     return caught
 
 
-def gptq_pass(model, calib_inputs, bits, g, grads=None, k=262144, percdamp=0.01):
+def gptq_pass(model, calib_inputs, bits, g, grads=None, k=262144, percdamp=0.01, team=False):
     """Quantize every decoder Linear in place with GPTQ on grid (bits, g).
 
     With grads (mnr), also returns flip candidates per direction, tagged with the Linear's index
     in target_linears order. Returns (stats, candidates, modules).
+    team: q-judge's GPTQ (gptq_team, its own min-max grid per group; g is ignored).
     """
     import torch
     levels = 2 ** bits
@@ -274,9 +342,12 @@ def gptq_pass(model, calib_inputs, bits, g, grads=None, k=262144, percdamp=0.01)
                 h.remove()
             for n, m in subset:
                 W0 = m.weight.data.float()
-                s, off = grid_params(m.weight.data, g, bits)
                 try:
-                    Q = gptq_quantize(W0, H[n], s, off, levels, percdamp)
+                    if team:
+                        Q, s, off = gptq_team(W0, H[n], bits, percdamp)
+                    else:
+                        s, off = grid_params(m.weight.data, g, bits)
+                        Q = gptq_quantize(W0, H[n], s, off, levels, percdamp)
                 except RuntimeError as e:
                     raise RuntimeError(f"{names[id(m)]}: {e}") from e
                 if grads is not None:
@@ -348,29 +419,38 @@ class Calibrated:
     """Calibration inputs (and, for mnr, the tuning set and BF16 gradients), reused across grids."""
 
     def __init__(self, judge, method, calib_samples=128, seqlen=512, seed=0, tune_items=DEFAULT_TUNE,
-                 tune_problems=32, batch_size=8, k=262144):
+                 tune_problems=32, batch_size=8, k=262144, calib_ids=None, calib_desc=None, tuning=None):
+        """calib_ids: optional list of 1-D token tensors (e.g. judge-format development prompts) in place
+        of the wikitext windows; tuning: optional ready Tuning in place of the S9 one."""
         assert method in ("gptq", "mnr")
         self.method, self.k = method, k
         t0 = time.time()
-        calib = load_calibration(judge.tok, calib_samples, seqlen, seed)
-        self.inputs = capture_inputs(judge.model, calib)
-        self.meta = {"method": method, "calib": DEFAULT_CALIB, "calib_samples": calib_samples,
-                     "calib_seqlen": seqlen, "calib_seed": seed}
+        if calib_ids is None:
+            calib_ids = load_calibration(judge.tok, calib_samples, seqlen, seed)
+            self.meta = {"method": method, "calib": DEFAULT_CALIB, "calib_samples": calib_samples,
+                         "calib_seqlen": seqlen, "calib_seed": seed}
+        else:
+            self.meta = {"method": method, "calib": calib_desc, "calib_samples": len(calib_ids),
+                         "calib_tokens": sum(len(x) for x in calib_ids)}
+        self.inputs = capture_inputs(judge.model, calib_ids)
         if method == "mnr":
             if "pointwise" not in judge.labels:
                 judge.calibrate("pointwise")
-            self.tuning = Tuning(judge, tune_items, tune_problems, batch_size)
+            self.tuning = tuning or Tuning(judge, tune_items, tune_problems, batch_size)
             self.ne_bf16 = self.tuning.note_effect(judge)
             self.grads = note_effect_grads(judge, self.tuning, max(1, batch_size // 2))
-            self.meta.update(tune_items=tune_items, tune_problems=self.tuning.n_problems,
+            self.meta.update(tune_items=getattr(self.tuning, "source", tune_items),
+                             tune_problems=self.tuning.n_problems,
                              tune_pairs=len(self.tuning.pairs), note_effect_bf16=self.ne_bf16)
         self.meta["setup_seconds"] = round(time.time() - t0, 1)
 
-    def quantize(self, judge, grid):
-        """Quantize judge.model (holding BF16 weights) in place on grid; returns stats."""
-        bits, g = parse_grid(grid)
+    def quantize(self, judge, grid, team_bits=None):
+        """Quantize judge.model (holding BF16 weights) in place on grid, or with q-judge's own GPTQ grid
+        at team_bits (grid ignored); returns stats."""
+        bits, g = (team_bits, None) if team_bits else parse_grid(grid)
         grads = self.grads if self.method == "mnr" else None
-        stats, cands, modules = gptq_pass(judge.model, self.inputs, bits, g, grads, self.k)
+        stats, cands, modules = gptq_pass(judge.model, self.inputs, bits, g, grads, self.k,
+                                          team=bool(team_bits))
         if self.method == "mnr":
             stats.update(neutralize(judge, self.tuning, self.ne_bf16, cands, modules))
         return stats
@@ -404,6 +484,14 @@ def self_test():
             assert torch.allclose(old, Q.view(-1)[idx].cpu())
         print(f"[self-test] grid g{g:02d}: output error GPTQ {e_gptq:.1f} vs RTN {e_rtn:.1f}; "
               f"{len(c[1][2])}+{len(c[-1][2])} flip candidates ok")
+    for bits in (4, 8):
+        Qt, st, ot = gptq_team(W, H, bits)
+        code = (Qt - ot.expand(-1, -1, GROUP).reshape(out_f, in_f)) / st.expand(-1, -1, GROUP).reshape(out_f, in_f)
+        assert torch.allclose(code, code.round(), atol=1e-2) and code.min() > -1e-2 and code.max() < 2 ** bits - 1 + 1e-2
+        Rt = team_rtn(W, bits)
+        e_t, e_r = float(((Qt - W) @ X.T).norm()), float(((Rt - W) @ X.T).norm())
+        assert e_t < e_r, (bits, e_t, e_r)
+        print(f"[self-test] team grid w{bits}: output error GPTQ {e_t:.1f} vs RTN {e_r:.1f} ok")
     print("[self-test] passed")
 
 

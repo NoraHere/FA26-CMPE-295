@@ -15,6 +15,9 @@ response when margin > 0. Per condition, on the chosen partition(s):
   note_*              add-on, if notes were scored: false acceptance of rule-breaking responses with the
                       "verified" note, and the mean note effect (margin with note - without)
 95% percentile bootstrap resampling prompts (--n-boot); paired differences vs BF16 use the same draws.
+Equivalence verdict per difference (q-judge core/metrics.py): equivalent if the CI lies inside
++/- margin, different if it excludes 0, otherwise inconclusive. Margins (--margins) default to the
+team's exp2 values: accuracy 0.03, false_accept 0.05, auroc 0.05; balanced_accuracy 0.03 (proposed).
 
 Usage:
   python ifeval_stats.py --run results/ifeval_qwen3-4b --partitions discovery
@@ -81,6 +84,17 @@ def metrics(sts):
     return out
 
 
+def verdict(ci95, margin):
+    lo, hi = ci95
+    if lo is None:
+        return "inconclusive"
+    if -margin < lo and hi < margin:
+        return "equivalent"
+    if lo > 0 or hi < 0:
+        return "different"
+    return "inconclusive"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True, help="results/<run> with scores.jsonl")
@@ -89,9 +103,11 @@ def main():
     ap.add_argument("--subsets", type=int, default=50)
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--margins", default="accuracy=0.03,balanced_accuracy=0.03,false_accept=0.05,auroc=0.05")
     args = ap.parse_args()
 
     run, d = Path(args.run), Path(args.data_dir)
+    margins = {k: float(v) for k, v in (kv.split("=") for kv in args.margins.split(","))}
     parts = set(args.partitions.split(","))
     with (d / "items.jsonl").open(encoding="utf-8") as f:
         items = [it for it in map(json.loads, f) if it["partition"] in parts]
@@ -125,7 +141,7 @@ def main():
         xs = sorted(x for x in xs if x == x)
         return [xs[int(0.025 * len(xs))], xs[min(len(xs) - 1, int(0.975 * len(xs)))]] if xs else [None, None]
 
-    out = {"run": str(run), "partitions": sorted(parts), "n_prompts": len(keys), "n_items": len(ids),
+    out = {"run": str(run), "partitions": sorted(parts), "margins": margins, "n_prompts": len(keys), "n_items": len(ids),
            "follow_rate": sum(follow[i] for i in ids) / len(ids), "conditions": {}}
     base_boot = [metrics([stats["bf16"][j] for j in b]) for b in boots]
     for c in conds:
@@ -137,6 +153,8 @@ def main():
             if c != "bf16" and name != "agreement_bf16":
                 diffs = [x[name] - y[name] for x, y in zip(cb, base_boot)]
                 res[name]["diff_vs_bf16"] = {"mean": v - metrics(stats["bf16"])[name], "ci95": ci(diffs)}
+                if name in margins:
+                    res[name]["diff_vs_bf16"]["verdict"] = verdict(res[name]["diff_vs_bf16"]["ci95"], margins[name])
         out["conditions"][c] = res
 
     notes_path = d / "notes.jsonl"
@@ -173,6 +191,12 @@ def main():
                 cell += f" [{v['ci95'][0]:.3f}, {v['ci95'][1]:.3f}]"
             cells.append(cell)
         lines.append(f"| {c} | " + " | ".join(cells) + " |")
+    lines += ["", "Equivalence vs BF16 (" + ", ".join(f"{k} +/-{v:g}" for k, v in margins.items()) + "):", "",
+              "| condition | " + " | ".join(margins) + " |", "|---|" + "---|" * len(margins)]
+    for c in conds:
+        if c != "bf16":
+            lines.append(f"| {c} | " + " | ".join(out["conditions"][c][k]["diff_vs_bf16"]["verdict"]
+                                                  for k in margins) + " |")
     if any("note_false_accept" in out["conditions"][c] for c in conds):
         lines += ["", "Add-on, verified note on rule-breaking responses:", "",
                   "| condition | false accept with note | mean note effect (logits) |", "|---|---|---|"]

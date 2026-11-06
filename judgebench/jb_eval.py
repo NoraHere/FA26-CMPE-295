@@ -152,9 +152,11 @@ class Judge:
         self.labels = {}
 
     def format_chat(self, user_text):
+        # optional system message (set judge.system, e.g. ifeval_score.py's team-style prompt)
+        msgs = ([{"role": "system", "content": self.system}] if getattr(self, "system", None) else []) \
+            + [{"role": "user", "content": user_text}]
         return self.tok.apply_chat_template(
-            [{"role": "user", "content": user_text}],
-            tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False,
         )
 
     def n_tokens(self, text):

@@ -10,7 +10,7 @@
 # IFEval steps 3-4 for one judge (judge set built by jobs/ifeval_generate.sbatch): score it under each condition,
 # then stats on PARTS (default discovery; locked only after pre-registration). Resumable.
 # Override: MODEL=/path CONDS=bf16,g00 DATA=data/ifeval PARTS=discovery EXTRA="--with-notes" sbatch ...
-# Smoke: DATA=data/ifeval_smoke EXTRA="--limit-items 16 --calib-samples 16 --tune-problems 4" sbatch ...
+# Smoke: RUN=ifeval_team_smoke EXTRA="--limit-items 16 --calib-samples 16 --tune-problems 4" sbatch ...
 set -euo pipefail
 cd /home/019111677/judgebench
 source env.sh
@@ -21,8 +21,8 @@ nvidia-smi --query-gpu=index,name,memory.used,compute_mode --format=csv
 MODEL=${MODEL:-/home/019111677/models/Qwen3-4B}
 DATA=${DATA:-data/ifeval}
 TAG=$(basename "$MODEL" | tr '[:upper:]' '[:lower:]')
-RUN=${RUN:-ifeval_${TAG}$([ "$DATA" = data/ifeval ] || echo _$(basename "$DATA"))}
+RUN=${RUN:-ifeval_team_${TAG}$([ "$DATA" = data/ifeval ] || echo _$(basename "$DATA"))}
 [ -f "$DATA/items.jsonl" ] || { echo "missing $DATA/items.jsonl: run jobs/ifeval_generate.sbatch first"; exit 1; }
-python ifeval_score.py --model-path "$MODEL" --data-dir "$DATA" --conditions "${CONDS:-bf16,i8g00,g00,gptq-g00,mnr-g00}" \
+python ifeval_score.py --model-path "$MODEL" --data-dir "$DATA" --conditions "${CONDS:-bf16,tao_w8,tao_w4,rtn_w4,gptq_w4,mnr_w4,i8g00,g00,gptq-g00}" \
     --run-name "$RUN" ${EXTRA:-}
 python ifeval_stats.py --run "results/$RUN" --data-dir "$DATA" --partitions "${PARTS:-discovery}"
