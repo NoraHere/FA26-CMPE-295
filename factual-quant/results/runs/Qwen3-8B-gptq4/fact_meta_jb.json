@@ -1,0 +1,29 @@
+{
+ "model": "Qwen3-8B-gptq4",
+ "quant": "gptq4",
+ "load_s": 4.222411870956421,
+ "weights_GiB": 15.25840425491333,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "sim_toolchain": "q-judge/qjudge/core/simquant.py (fake-quant, BF16 runtime)",
+ "sim_bits": 4,
+ "sim_group_size": 128,
+ "sim_excluded": [
+  "embed_tokens",
+  "lm_head"
+ ],
+ "sim_method": "gptq",
+ "sim_damp": 0.01,
+ "sim_calib_n": 128,
+ "sim_calib_subsets": [
+  "Focus",
+  "Math",
+  "Precise IF",
+  "Safety",
+  "Ties"
+ ],
+ "sim_calib_tokens": 58178,
+ "sim_gptq_loss_total": 8061.619,
+ "sim_quantize_s": 386.0,
+ "jb_pairs": 154,
+ "jb_s": 52.95058012008667
+}

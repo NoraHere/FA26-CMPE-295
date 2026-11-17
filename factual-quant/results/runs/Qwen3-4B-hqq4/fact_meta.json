@@ -1,0 +1,10 @@
+{
+ "model": "Qwen3-4B-hqq4",
+ "quant": "hqq4",
+ "load_s": 13.22202181816101,
+ "weights_GiB": 2.541673183441162,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "prompts": 11930,
+ "score_s": 122.14117789268494,
+ "peak_GiB": 9.344871520996094
+}

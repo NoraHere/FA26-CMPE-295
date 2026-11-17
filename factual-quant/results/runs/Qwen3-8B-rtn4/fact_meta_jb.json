@@ -1,0 +1,18 @@
+{
+ "model": "Qwen3-8B-rtn4",
+ "quant": "rtn4",
+ "load_s": 4.226547956466675,
+ "weights_GiB": 15.25840425491333,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "sim_toolchain": "q-judge/qjudge/core/simquant.py (fake-quant, BF16 runtime)",
+ "sim_bits": 4,
+ "sim_group_size": 128,
+ "sim_excluded": [
+  "embed_tokens",
+  "lm_head"
+ ],
+ "sim_method": "rtn",
+ "sim_quantize_s": 1.6,
+ "jb_pairs": 154,
+ "jb_s": 53.296807289123535
+}

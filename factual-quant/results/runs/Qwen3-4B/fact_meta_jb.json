@@ -1,0 +1,9 @@
+{
+ "model": "Qwen3-4B",
+ "quant": "bf16",
+ "load_s": 10.082191228866577,
+ "weights_GiB": 7.492448329925537,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "jb_pairs": 154,
+ "jb_s": 35.46838355064392
+}

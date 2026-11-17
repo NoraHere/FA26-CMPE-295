@@ -1,0 +1,10 @@
+{
+ "model": "Qwen3-8B-h100",
+ "quant": "bf16",
+ "load_s": 20.714653730392456,
+ "weights_GiB": 15.25840425491333,
+ "gpu": "NVIDIA H100 NVL",
+ "prompts": 11930,
+ "score_s": 92.87747573852539,
+ "peak_GiB": 22.90816020965576
+}

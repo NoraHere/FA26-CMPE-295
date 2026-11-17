@@ -1,0 +1,10 @@
+{
+ "model": "Qwen3-8B-fp8-h100",
+ "quant": "fp8",
+ "load_s": 3.6584513187408447,
+ "weights_GiB": 8.793896198272705,
+ "gpu": "NVIDIA H100 NVL",
+ "prompts": 11930,
+ "score_s": 100.30398559570312,
+ "peak_GiB": 17.909591674804688
+}

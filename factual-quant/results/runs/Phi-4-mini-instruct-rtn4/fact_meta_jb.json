@@ -1,0 +1,18 @@
+{
+ "model": "Phi-4-mini-instruct-rtn4",
+ "quant": "rtn4",
+ "load_s": 2.9731764793395996,
+ "weights_GiB": 7.145147800445557,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "sim_toolchain": "q-judge/qjudge/core/simquant.py (fake-quant, BF16 runtime)",
+ "sim_bits": 4,
+ "sim_group_size": 128,
+ "sim_excluded": [
+  "embed_tokens",
+  "lm_head"
+ ],
+ "sim_method": "rtn",
+ "sim_quantize_s": 0.8,
+ "jb_pairs": 154,
+ "jb_s": 26.859432458877563
+}

@@ -1,0 +1,35 @@
+{
+ "model": "Qwen3-4B-gptaq4",
+ "quant": "gptaq4",
+ "load_s": 2.6692206859588623,
+ "weights_GiB": 7.492448329925537,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "sim_toolchain": "q-judge/qjudge/core/simquant.py (fake-quant, BF16 runtime)",
+ "sim_bits": 4,
+ "sim_group_size": 128,
+ "sim_excluded": [
+  "embed_tokens",
+  "lm_head"
+ ],
+ "sim_method": "gptaq (asymmetric target W*)",
+ "gptaq_alpha": 0.25,
+ "gptaq_cdamp": 1.0,
+ "sim_damp": 0.01,
+ "sim_calib_n": 128,
+ "sim_calib_subsets": [
+  "Focus",
+  "Math",
+  "Precise IF",
+  "Safety",
+  "Ties"
+ ],
+ "sim_gptq_loss_total": 4580.757,
+ "gptaq_rel_correction_mean": 0.02098960008992262,
+ "gptaq_rel_correction_max": 0.0673026442527771,
+ "sim_quantize_s": 322.3,
+ "jb_pairs": 154,
+ "jb_s": 35.57631254196167,
+ "prompts": 11930,
+ "score_s": 111.32868313789368,
+ "peak_GiB": 14.304280281066895
+}

@@ -1,0 +1,10 @@
+{
+ "model": "Qwen3-8B-int4",
+ "quant": "int4",
+ "load_s": 4.974919080734253,
+ "weights_GiB": 5.78916597366333,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "prompts": 11930,
+ "score_s": 1433.0137314796448,
+ "peak_GiB": 13.415606498718262
+}

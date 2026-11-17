@@ -1,0 +1,10 @@
+{
+ "model": "Qwen3-8B-llmc-gptq-w4a16",
+ "quant": "bf16",
+ "load_s": 3.891127586364746,
+ "weights_GiB": 5.656473636627197,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "prompts": 11930,
+ "score_s": 207.70679569244385,
+ "peak_GiB": 26.223599433898926
+}

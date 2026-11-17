@@ -1,0 +1,10 @@
+{
+ "model": "Phi-4-mini-instruct-int4",
+ "quant": "int4",
+ "load_s": 9.688138961791992,
+ "weights_GiB": 2.7396302223205566,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "prompts": 11930,
+ "score_s": 588.6242501735687,
+ "peak_GiB": 9.574044227600098
+}

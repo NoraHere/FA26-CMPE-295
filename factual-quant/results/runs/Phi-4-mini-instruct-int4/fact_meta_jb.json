@@ -1,0 +1,9 @@
+{
+ "model": "Phi-4-mini-instruct-int4",
+ "quant": "int4",
+ "load_s": 3.2086243629455566,
+ "weights_GiB": 2.7396302223205566,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "jb_pairs": 154,
+ "jb_s": 178.06955909729004
+}

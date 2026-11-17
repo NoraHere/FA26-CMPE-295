@@ -1,0 +1,10 @@
+{
+ "model": "Phi-4-mini-instruct-h100",
+ "quant": "bf16",
+ "load_s": 7.818458080291748,
+ "weights_GiB": 7.145147800445557,
+ "gpu": "NVIDIA H100 NVL",
+ "prompts": 11930,
+ "score_s": 43.415982246398926,
+ "peak_GiB": 13.821845054626465
+}

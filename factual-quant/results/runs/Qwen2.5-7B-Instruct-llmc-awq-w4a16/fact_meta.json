@@ -1,0 +1,10 @@
+{
+ "model": "Qwen2.5-7B-Instruct-llmc-awq-w4a16",
+ "quant": "bf16",
+ "load_s": 3.615901470184326,
+ "weights_GiB": 5.197946071624756,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "prompts": 11930,
+ "score_s": 178.16774773597717,
+ "peak_GiB": 23.380249500274658
+}

@@ -1,0 +1,9 @@
+{
+ "model": "Qwen2.5-7B-Instruct",
+ "quant": "bf16",
+ "load_s": 18.732036590576172,
+ "weights_GiB": 14.188609600067139,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "jb_pairs": 154,
+ "jb_s": 43.68658661842346
+}

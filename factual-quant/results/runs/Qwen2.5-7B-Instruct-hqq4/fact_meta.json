@@ -1,0 +1,10 @@
+{
+ "model": "Qwen2.5-7B-Instruct-hqq4",
+ "quant": "hqq4",
+ "load_s": 22.75259232521057,
+ "weights_GiB": 5.323775768280029,
+ "gpu": "NVIDIA A100-PCIE-40GB",
+ "prompts": 11930,
+ "score_s": 165.90329360961914,
+ "peak_GiB": 11.317619800567627
+}

@@ -1,0 +1,44 @@
+{
+ "model": "Qwen3-8B-mnr4",
+ "quant": "mnr4",
+ "load_s": 175.2008137702942,
+ "weights_GiB": 15.25840425491333,
+ "gpu": "NVIDIA H100 NVL",
+ "sim_toolchain": "q-judge/qjudge/core/simquant.py (fake-quant, BF16 runtime)",
+ "sim_bits": 4,
+ "sim_group_size": 128,
+ "sim_excluded": [
+  "embed_tokens",
+  "lm_head"
+ ],
+ "mnr_dev_pairs": 128,
+ "mnr_bf16_dev_note_effect_mean": 21.75,
+ "mnr_gradient_s": 31.8,
+ "sim_method": "gptq+mnr",
+ "sim_damp": 0.01,
+ "sim_calib_n": 128,
+ "sim_calib_subsets": [
+  "Focus",
+  "Math",
+  "Precise IF",
+  "Safety",
+  "Ties"
+ ],
+ "sim_calib_tokens": 58178,
+ "sim_gptq_loss_total": 8026.642,
+ "mnr": {
+  "T_before": -0.7250377833843231,
+  "T_after": 8.467072620987892e-05,
+  "tau": -211.275634765625,
+  "reached": true,
+  "moved": 12600360,
+  "moved_frac": 0.0018141062363334324,
+  "K": 4194304
+ },
+ "sim_quantize_s": 475.9,
+ "jb_pairs": 154,
+ "jb_s": 32.837159395217896,
+ "prompts": 11930,
+ "score_s": 110.25608515739441,
+ "peak_GiB": 47.164912700653076
+}

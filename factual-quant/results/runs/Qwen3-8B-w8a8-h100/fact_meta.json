@@ -1,0 +1,10 @@
+{
+ "model": "Qwen3-8B-w8a8-h100",
+ "quant": "w8a8",
+ "load_s": 6.003985643386841,
+ "weights_GiB": 8.791286945343018,
+ "gpu": "NVIDIA H100 NVL",
+ "prompts": 11930,
+ "score_s": 460.6245539188385,
+ "peak_GiB": 17.295654296875
+}
